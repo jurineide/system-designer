@@ -47,18 +47,38 @@
 ### 2.1 Máquina de Estados e Fluxos Ponta a Ponta
 
 - **Estados do Pedido:** Defina a máquina de estados explícita do ciclo de vida da transação no seu modelo (incluindo os estados iniciais, intermediários, de compensação e finais).
-  > [Sua resposta aqui]
+  > - **Inicial:** `CRIADO`
+  > - **Intermediários:** `RESERVANDO_ESTOQUE` → `AGUARDANDO_PAGAMENTO` → `PAGO` → `CONFIRMANDO_ESTOQUE`
+  > - **Compensação:** `LIBERANDO_ESTOQUE` (pagamento recusado), `ESTORNANDO` (falha de estoque após o pagamento)
+  > - **Finais:** `CONCLUIDO`, `CANCELADO` (sem cobrança), `CANCELADO_COM_ESTORNO`, `FALHA_ESTORNO` (exige tratamento manual)
+  >
+  > Decisão de design: **reservar o estoque antes de cobrar**. Isso evita a maior parte do incidente, porque o cliente só paga por um item que está separado para ele. A reserva tem prazo de expiração.
 - **Detalhamento dos Fluxos:**
   - **Caminho Feliz:** Descreva o fluxo de ponta a ponta da transação concluída com sucesso entre Checkout, Pagamento e Estoque.
   - **Caminho de Falha & Compensação:** Descreva o passo a passo a partir da falha na reserva de estoque após o pagamento aprovado. Como a ação compensatória (estorno) é disparada e executada sem intervenção humana?
-  > [Sua resposta aqui]
+  > **Caminho Feliz:**
+  > 1. Checkout cria o pedido (`CRIADO`) e a saga envia `ReservarEstoque`.
+  > 2. Estoque reserva o item com prazo e responde `EstoqueReservado` → `AGUARDANDO_PAGAMENTO`.
+  > 3. A saga envia `CobrarPagamento` (com Idempotency-Key = ID do pedido); o Pagamento confirma o Pix e responde `PagamentoAprovado` → `PAGO`.
+  > 4. A saga envia `ConfirmarReserva`; o Estoque baixa a reserva definitivamente → `CONCLUIDO`.
+  >
+  > **Caminho de Falha & Compensação** (o pagamento foi aprovado, mas o Estoque responde `EstoqueRejeitado` na confirmação, por exemplo porque a reserva expirou durante um Pix lento):
+  > 1. A saga recebe `EstoqueRejeitado` e transiciona o pedido para `ESTORNANDO`, gravando o estado no banco.
+  > 2. Na mesma transação, grava o comando `EstornarPagamento` na tabela de outbox.
+  > 3. O Pagamento consome o comando e pede a devolução do Pix ao gateway, usando a Idempotency-Key `estorno-{pedidoId}`.
+  > 4. O Pagamento responde `PagamentoEstornado` → `CANCELADO_COM_ESTORNO`, e o cliente é notificado.
+  >
+  > Tudo isso é disparado pela própria máquina de estados ao receber o evento de falha, sem intervenção humana.
 
 ### 2.2 Resiliência da Compensação e Consistência
 
 - **E se a compensação falhar ou oscilar?** A chamada ou evento de estorno pode sofrer timeout ou instabilidade transitória. Como seu design garante que o cliente não fique no prejuízo se a tentativa de compensação falhar ou for reprocessada?
-  > [Sua resposta aqui]
+  > - **Compensação sempre retentável:** o estorno não pode ser recusado por regra de negócio. Se falhar por algo transitório, é reenviado com backoff exponencial.
+  > - **Idempotência:** o estorno usa sempre a mesma chave (`estorno-{pedidoId}`), então reprocessar ou receber a mensagem duas vezes nunca devolve o dinheiro duas vezes.
+  > - **Estado persistido:** como `ESTORNANDO` está gravado no banco, se o serviço cair no meio, a saga retoma de onde parou ao reiniciar.
+  > - **Último recurso:** depois de N tentativas, a mensagem vai para uma DLQ, o pedido vai para `FALHA_ESTORNO` e um alerta é disparado. Um job de reconciliação compara as transações do gateway com os pedidos cancelados e reprocessa o que ficou pendente.
 - **Atomicidade entre Estado e Mensageria (Dual Write):** Se a sua arquitetura envolve publicação de eventos ou mensagens entre passos, como você garante que a persistência no banco local e o despacho da mensagem ocorram sem risco de perda silenciosa se a rede ou o broker falharem entre as duas operações?
-  > [Sua resposta aqui]
+  > **Transactional Outbox.** Em vez de salvar no banco e depois publicar no broker (duas operações que podem falhar separadamente), o serviço grava, **na mesma transação local**, a mudança de estado e a mensagem numa tabela `outbox`. Um relay (polling ou CDC com Debezium) lê a outbox e publica no broker, marcando como enviada. Se o broker estiver fora, a mensagem continua na tabela e é publicada quando ele voltar. A entrega é *at-least-once*, então cada consumidor é idempotente: guarda os IDs já processados numa tabela `inbox` e ignora duplicatas.
 
 ---
 
