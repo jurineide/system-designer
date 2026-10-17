@@ -17,15 +17,28 @@
 ### 1.1 Volumetria e Pragmatismo: 2PC vs Saga
 
 - **Análise Crítica:** Em quais cenários arquiteturais uma transação ACID local ou Two-Phase Commit (2PC) resolveria o problema com menor custo operacional? Por que, para o cenário de 5.000 TPS na Black Friday com serviços e bancos autônomos, o 2PC é inviável e a consistência eventual se torna necessária?
-  > [Sua resposta aqui]
+  > - **ACID local resolve** quando os dados estão no mesmo banco (ex.: monolito modular com Checkout, Pagamento e Estoque num só PostgreSQL): um único `@Transactional` e pronto.
+  > - **2PC resolve** com poucos participantes, baixo volume, todos no mesmo datacenter e com suporte a XA (ex.: integração interna de sistemas legados).
+  > - **Por que 2PC é inviável aqui:**
+  >   - é bloqueante: todos os participantes seguram locks até o coordenador decidir, então a latência vira a do participante mais lento e, a 5.000 TPS, isso esgota conexões;
+  >   - o coordenador é ponto único de falha: se cair depois do *prepare*, os recursos ficam travados;
+  >   - a disponibilidade total vira o produto da disponibilidade de cada serviço;
+  >   - o gateway de Pix e o broker não participam de XA.
+  >
+  > Por isso usamos **Saga**: uma sequência de transações locais, cada uma com sua compensação, aceitando consistência eventual.
 
 ### 1.2 O Modelo de Coordenação da Saga
 
-- **A Escolha:** ( ) Coreografia (Orientada a Eventos)  ( ) Orquestração (Process Manager / Máquina de Estados)
+- **A Escolha:** ( ) Coreografia (Orientada a Eventos)  (X) Orquestração (Process Manager / Máquina de Estados)
 - **Justificativa e Mitigação das Desvantagens do seu Modelo:**
   - *Se você escolheu Coreografia:* Como seu design resolve a falta de visibilidade centralizada (saber em tempo real onde o pedido está) e previne dependências cíclicas à medida que novos serviços entrarem no fluxo de compra?
   - *Se você escolheu Orquestração:* Qual componente atua como Orquestrador, como ele se comunica com os participantes (síncrono ou assíncrono) e como você evita que ele se transforme em um "serviço Deus", tirando a inteligência e a autonomia dos outros microsserviços?
-  > [Sua resposta aqui]
+  > - **Orquestrador:** a `SagaDePedido`, dentro do serviço de Checkout (dono do pedido). É uma máquina de estados persistida no banco do Checkout, o que dá visibilidade em tempo real de onde cada pedido está.
+  > - **Comunicação:** assíncrona, por comandos e respostas num broker (Kafka/RabbitMQ): `ReservarEstoque` → `EstoqueReservado`/`EstoqueRejeitado`, `CobrarPagamento` → `PagamentoAprovado`/`PagamentoRecusado`. Um participante lento não prende threads do orquestrador.
+  > - **Evitando o "serviço Deus":**
+  >   - o orquestrador só conhece a **sequência** e as **transições**; as regras de negócio ficam nos participantes (o Estoque decide se há saldo, o Pagamento fala com o gateway);
+  >   - ele nunca acessa o banco de outro serviço, só envia comandos;
+  >   - uma saga por processo de negócio, e não um orquestrador central para tudo.
 
 ---
 
