@@ -88,10 +88,28 @@
 
 - **O Problema de Leitura:** Durante o pico de vendas, milhões de usuários atualizam a página de "Meus Pedidos" a cada poucos segundos.
 - **Desenho da Solução:** Como você separa a responsabilidade de escrita (Command) da consulta de status (Query)? Como o modelo de leitura é alimentado e como sua arquitetura lida com a consistência eventual (o delay entre o pagamento e a visualização do status)?
-  > [Sua resposta aqui]
+  > - **Command:** criar pedido, pagar e cancelar passam pela saga e gravam nos bancos de escrita (PostgreSQL) de cada serviço.
+  > - **Query:** um serviço de consulta separado lê só de um modelo de leitura desnormalizado (ex.: MongoDB ou Redis, indexado por `customer_id`), com um documento por pedido já pronto para a tela. As consultas nunca tocam o banco transacional.
+  > - **Alimentação:** os eventos da saga (`PedidoCriado`, `PagamentoAprovado`, `PedidoCancelado`...) saem pela outbox para o Kafka, e um consumidor de projeção atualiza o modelo de leitura. Cada evento leva a versão do pedido, então eventos fora de ordem ou duplicados são ignorados.
+  > - **Consistência eventual:**
+  >   - a tela mostra estados intermediários honestos ("pagamento em processamento");
+  >   - logo após a compra, o front usa o status devolvido pelo próprio comando, sem esperar a projeção;
+  >   - em vez de o usuário atualizar a página a cada segundo, o status chega por SSE/WebSocket quando muda, o que também reduz a carga;
+  >   - o lag do consumidor é monitorado, com alerta se passar de alguns segundos.
 
 ### 3.2 Estratégia de Testes da Transação Distribuída
 
 - **Validação de Resiliência:** Como comprovar em ambiente de testes e pipeline que a Saga funciona de verdade?
 - **Plano de Testes:** Descreva como você estruturaria o teste automatizado para simular a rejeição na reserva de estoque após a cobrança e validar que a compensação automática transiciona o pedido para cancelado com sucesso.
-  > [Sua resposta aqui]
+  > **Teste de integração da saga** (roda no pipeline a cada PR):
+  > - **Ambiente:** Testcontainers sobe PostgreSQL e Kafka reais; WireMock simula o gateway de pagamento (cobrança aprovada e endpoint de estorno).
+  > - **Cenário principal:**
+  >   1. o Estoque (stub consumidor) responde `EstoqueReservado` na reserva e `EstoqueRejeitado` na confirmação;
+  >   2. o teste dispara o checkout;
+  >   3. com Awaitility, espera o pedido chegar a `CANCELADO_COM_ESTORNO`;
+  >   4. verifica no WireMock que o estorno foi chamado **exatamente uma vez**, com a Idempotency-Key `estorno-{pedidoId}`.
+  > - **Variações:**
+  >   - o estorno falha nas 2 primeiras tentativas (Scenarios do WireMock) e mesmo assim termina estornado, sempre com a mesma chave;
+  >   - a mensagem `EstoqueRejeitado` é entregue em duplicidade e só um estorno acontece;
+  >   - o broker cai no meio do fluxo e as mensagens da outbox são publicadas quando ele volta.
+  > - **Complementos:** testes de contrato das mensagens (Spring Cloud Contract / Pact) entre os serviços e injeção de falhas com Toxiproxy em homologação.
