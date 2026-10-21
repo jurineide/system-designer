@@ -15,11 +15,32 @@
 ## 1. Logs e Correlação
 
 - **Campos do Log:** Que campos todo log do Checkout precisa ter para você encontrar, no meio de milhares de linhas, as da requisição que travou? Liste os campos e diga para que serve cada um.
-  > [Sua resposta aqui]
+  > Logs **estruturados em JSON** (um objeto por linha), para a ferramenta de logs filtrar por campo em vez de buscar texto:
+  > - `timestamp` (ISO-8601, UTC): ordenar os eventos e cruzar com métricas.
+  > - `level`: separar erros e avisos do resto.
+  > - `service` e `version` (tag/digest da imagem): saber se a linha veio do **canary** ou da versão estável, essencial neste incidente.
+  > - `pod` / `instance`: achar uma réplica com problema.
+  > - `trace_id` e `span_id`: juntar todas as linhas de uma requisição, nos três serviços.
+  > - `order_id`: achar a requisição a partir da reclamação do cliente.
+  > - `http.route`, `http.method`, `http.status` e `duration_ms`: saber qual endpoint, com qual resultado e quanto tempo levou.
+  > - `dependency` e `dependency_duration_ms`: mostrar qual chamada externa (Pagamento, Estoque, banco) segurou o tempo.
+  > - `saga_step`: em qual etapa da Saga o pedido parou.
+  > - `error.type` e `message`: o que aconteceu.
 - **O Caminho do Contexto:** Como o mesmo identificador de rastreamento passa do Checkout para o Pagamento e o Estoque numa chamada HTTP?
-  > [Sua resposta aqui]
+  > Pelo header padrão **W3C Trace Context**, `traceparent: 00-<trace_id>-<span_id>-01`, criado pelo Checkout quando a requisição chega.
+  > - O **OpenTelemetry** (agente Java ou Micrometer Tracing) instrumenta o `RestClient`/`WebClient` e injeta o header automaticamente em toda chamada ao Pagamento e ao Estoque. Do outro lado, o servidor lê o header e continua o mesmo trace, criando um span filho.
+  > - O `trace_id` vai para o **MDC** do SLF4J, então aparece sozinho em todo log daquela requisição, sem o desenvolvedor lembrar de colocar.
+  > - Nas mensagens assíncronas da Saga (Kafka), o mesmo `traceparent` viaja nos headers da mensagem.
 - **LGPD nos Logs:** Quais dados de cliente ficam fora de logs e traces? Para os identificadores que precisam aparecer, qual tratamento você aplica e quem pode ler esses registros?
-  > [Sua resposta aqui]
+  > - **Ficam fora:** CPF, nome, e-mail, telefone, endereço, chave Pix, dados de cartão (também por PCI-DSS), tokens e senhas, e os corpos de requisição e resposta inteiros.
+  > - **Identificadores que precisam aparecer:**
+  >   - usa-se o `customer_id` interno (pseudônimo), que sozinho não identifica a pessoa;
+  >   - se for preciso correlacionar por CPF, ele aparece como hash HMAC com chave secreta, nunca em claro;
+  >   - em último caso, mascarado (`***.***.123-**`).
+  > - **Duas camadas de proteção:**
+  >   - um mascaramento no encoder do Logback, na aplicação;
+  >   - um processador de redação no OpenTelemetry Collector, que pega o que escapar da primeira.
+  > - **Acesso:** restrito por papel (RBAC) ao time do serviço e ao suporte de plantão, com auditoria de quem consultou o quê. Logs criptografados em repouso e com retenção limitada (ex.: 30 dias).
 
 ---
 
