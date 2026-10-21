@@ -71,9 +71,19 @@
 
 ## 3. Traces e Amostragem
 
-- **A Escolha:** ( ) Head Sampling  ( ) Tail Sampling  ( ) Combinação das duas
+- **A Escolha:** ( ) Head Sampling  ( ) Tail Sampling  (X) Combinação das duas
 - **Justificativa:** Guardar 100% dos traces a 5.000 TPS custa caro. Qual é a sua regra de retenção, e como ela evita que justamente as requisições que travaram sejam descartadas?
-  > [Sua resposta aqui]
+  > - **Head sampling só onde não há valor diagnóstico:** decidido no início da requisição, no próprio serviço. Health checks e métricas: 0%. Endpoints de altíssimo volume e baixo risco (ex.: consulta de catálogo): pequena amostra. No fluxo de **checkout, 100% dos spans** seguem para o Collector, porque no início da requisição ainda não dá para saber se ela vai travar.
+  > - **Tail sampling no OpenTelemetry Collector:** a decisão é tomada **depois que o trace termina**, olhando o trace inteiro. A regra de retenção:
+  >   - guarda **100%** dos traces com erro, timeout ou requisição abandonada pelo cliente;
+  >   - guarda **100%** dos traces mais lentos que o SLO (ex.: acima de 1 s);
+  >   - guarda **100%** dos traces da versão **canary** durante o rollout;
+  >   - guarda **5%** aleatórios do restante, como linha de base do comportamento normal.
+  >
+  > Assim, as requisições que travaram são exatamente as que ficam. O volume guardado cai para algo próximo de 5% do total.
+  > - **Cuidados para funcionar:**
+  >   - um exporter de balanceamento por `trace_id` manda todos os spans do mesmo trace para a mesma instância do Collector;
+  >   - o tempo de espera da decisão (`decision_wait`) é maior que o timeout do cliente, para um trace travado não ser julgado antes de terminar.
 
 ---
 
