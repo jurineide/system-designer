@@ -17,12 +17,22 @@
 ### 1.1 Anatomia da Imagem e Redução de Superfície de Ataque
 
 - **Construção vs Execução:** Como você estruturará o empacotamento do serviço de Checkout para produção? Especifique o que deve ser usado na etapa de compilação, o que deve (e o que não deve) entrar na imagem final de execução, com qual permissão de usuário o processo rodará e qual o trade-off da sua escolha de imagem base para a segurança e para o diagnóstico em produção.
-  > [Sua resposta aqui]
+  > **Dockerfile multi-stage:**
+  > - **Estágio de build:** imagem com JDK 21 e Maven (`eclipse-temurin:21-jdk`). Compila, roda os testes e gera o `.jar` (com as camadas do Spring Boot extraídas, para aproveitar cache). Esse estágio é descartado.
+  > - **Imagem final:** `gcr.io/distroless/java21-debian12:nonroot`, só com a JRE e o `.jar`.
+  > - **Não entra na imagem final:** JDK, Maven, código-fonte, `~/.m2`, shell, `apt`, `curl` e segredos (que chegam por variável de ambiente ou secret manager em tempo de execução).
+  > - **Usuário:** `nonroot` (UID 65532), nunca root, com sistema de arquivos somente leitura no Kubernetes.
+  >
+  > **Trade-off:** a Distroless reduz muito a superfície de ataque e as CVEs de sistema operacional (sem shell, um invasor não tem ferramentas para usar), mas também não dá para entrar no container para investigar. O diagnóstico em produção passa a depender de observabilidade (logs, métricas, traces, Actuator), de `kubectl debug` com um container efêmero ou da variante `:debug` da imagem, usada só fora de produção.
 
 ### 1.2 Rastreabilidade, Identidade do Artefato e Parametrização
 
 - **Da Homologação à Produção:** Como sua esteira garante que o binário executado em produção é exatamente o mesmo que passou nos testes de homologação? Explique como as configurações mudam entre ambientes (dev, staging, prod) sem recompilar o artefato e como você identifica a versão no registry para que um rollback nunca puxe um binário sobrescrito por engano.
-  > [Sua resposta aqui]
+  > - **Build once, deploy many:** a imagem é construída **uma única vez**, no merge na `main`. Homologação e produção recebem essa mesma imagem; produção nunca recompila.
+  > - **Identidade imutável:** a imagem recebe uma tag com a versão e o SHA do commit (ex.: `checkout:1.8.3-a1b2c3d`), e o deploy referencia o **digest** (`checkout@sha256:...`), que é o hash do conteúdo e não muda. O registry é configurado com **tags imutáveis**, e a tag `:latest` não é usada em deploy.
+  > - **Promoção:** passar para produção é só apontar o manifesto (Helm/Kubernetes) para o digest aprovado em homologação. Assim, o binário de produção é comprovadamente o mesmo que foi testado.
+  > - **Configuração por ambiente (12-Factor):** o mesmo artefato lê a configuração de fora: variáveis de ambiente, ConfigMaps, Spring Profiles e segredos do Vault ou Secrets Manager. Nada de ambiente é embutido na imagem.
+  > - **Rollback:** voltar é reaplicar o digest da versão anterior, que continua no registry e não pode ser sobrescrito.
 
 ---
 
