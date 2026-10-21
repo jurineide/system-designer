@@ -47,11 +47,25 @@
 ## 2. Métricas
 
 - **Visão do Cliente (RED):** Quais métricas do Checkout entram no painel? Explique como você mede a duração para que o travamento de uma parte dos clientes não desapareça na média.
-  > [Sua resposta aqui]
+  > - **Rate:** requisições por segundo do `POST /checkout`, por status e por versão.
+  > - **Errors:** HTTP 5xx **e também** timeouts e requisições abandonadas pelo cliente (conexão fechada antes da resposta). Neste incidente não houve 500: o erro estava escondido nos abandonos.
+  > - **Duration:** medida com **histograma** (Micrometer com `publishPercentileHistogram`), e o painel mostra **p50, p95, p99 e p99,9**, nunca só a média. Se 3% dos clientes travam por 30 s e o resto responde em 80 ms, a média fica perto de 120 ms e parece saudável; o p99 mostra os 30 s na hora.
+  > - **SLO e negócio:** percentual de checkouts respondidos em menos de 1 s (com alerta por *burn rate*) e pedidos concluídos por minuto. A queda de conversão aparece aqui mesmo quando a técnica parece verde.
+  > - Todos os painéis separam **canary e estável** lado a lado.
 - **Visão dos Recursos (USE):** Que recursos você monitora? Que sinal acusaria saturação antes do primeiro HTTP 500?
-  > [Sua resposta aqui]
+  > Para cada recurso, medimos **utilização, saturação (fila) e erros**:
+  > - **Pool de conexões do banco (HikariCP):** conexões ativas, **pendentes** e tempo para obter uma conexão.
+  > - **Pool HTTP do cliente para Pagamento e Estoque:** conexões em uso e requisições esperando conexão.
+  > - **Threads da aplicação:** threads ocupadas e fila de requisições do Tomcat (ou virtual threads presas).
+  > - **Resiliência:** estado do Circuit Breaker, vagas livres no Bulkhead e timeouts do TimeLimiter.
+  > - **JVM e container:** heap, pausas de GC e *CPU throttling* do container (que fica escondido atrás de um "CPU abaixo de 40%").
+  > - **Banco e mensageria:** conexões e esperas por lock no PostgreSQL, e lag do consumidor Kafka.
+  >
+  > **Sinal antecipado:** `hikaricp_connections_pending` acima de zero e subindo, junto com o tempo para obter conexão (ou fila no pool HTTP). As requisições ficam esperando um recurso, a CPU fica baixa e nenhum 500 aparece ainda. É o retrato deste incidente.
 - **Labels:** Quais labels você permite nessas métricas e quais proíbe? Diga o efeito de cada escolha no servidor de métricas.
-  > [Sua resposta aqui]
+  > - **Permitidas (baixa cardinalidade, poucos valores possíveis):** `service`, `version`, `env`, `region`, `pod`, `http.route` como template (`/orders/{id}`, nunca a URL com o ID), `method`, `status` ou classe de status (`2xx`, `5xx`), `outcome` e `dependency`. Cada combinação vira uma série temporal, e com poucos valores o total de séries fica controlado.
+  > - **Proibidas (alta cardinalidade):** `customer_id`, `order_id`, `trace_id`, e-mail, URL completa e mensagem de erro. Cada valor novo cria uma **série nova**. A 5.000 TPS seriam milhões de séries: o Prometheus estoura memória e disco, as consultas ficam lentas e o custo dispara (além do risco de LGPD).
+  > - Esses detalhes vão para **logs e traces**. Para ligar os mundos, a métrica de latência carrega **exemplars**: um ponto lento no gráfico do p99 leva direto ao `trace_id` de uma requisição real.
 
 ---
 
