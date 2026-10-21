@@ -90,4 +90,18 @@
 ## 4. Estratégia de Testes
 
 - **Qual a nossa estratégia para testar isso e garantir que funciona?** Antes da próxima Black Friday, como você prova que os painéis e os alertas mostrariam este incidente?
-  > [Sua resposta aqui]
+  > Reproduzindo o incidente de propósito, num ambiente controlado, e conferindo que cada sinal aparece.
+  > - **Game day em homologação:**
+  >   1. carga realista com k6/Gatling;
+  >   2. uma versão canary com Toxiproxy injetando 30 s de latência em uma pequena parte das chamadas ao Pagamento (ou um pool de conexões propositalmente pequeno);
+  >   3. o teste passa se, em poucos minutos:
+  >      - o p99 e os abandonos do canary sobem enquanto a média continua baixa (provando que o painel não depende da média);
+  >      - `hikaricp_connections_pending` sobe antes de qualquer 500;
+  >      - o alerta de *burn rate* do SLO dispara;
+  >      - a análise do canary aborta sozinha.
+  > - **Testes automatizados no pipeline:**
+  >   - **Regras de alerta:** testadas com `promtool test rules`, com séries simuladas que imitam o incidente (média baixa e p99 alto) e verificação de que o alerta dispara.
+  >   - **Teste de integração com os três serviços:** confere que os logs saem em JSON com os campos obrigatórios e que o mesmo `trace_id` aparece no Checkout, no Pagamento e no Estoque.
+  >   - **LGPD:** um teste varre os logs gerados na suíte com regex de CPF, e-mail e cartão, e falha se encontrar algum.
+  >   - **Tail sampling:** com uma requisição lenta forçada, confere que o trace dela foi guardado e que dá para chegar nele pelo exemplar do p99.
+  > - **Monitoramento sintético em produção:** um robô faz um checkout de teste a cada minuto, medindo do ponto de vista do cliente. Se a tela "fica carregando", ele percebe mesmo quando o servidor acha que está tudo bem.
