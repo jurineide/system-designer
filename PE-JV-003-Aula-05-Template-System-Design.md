@@ -84,12 +84,40 @@
 ### 3.1 Gates de Segurança e Guardrails no Processo de Entrega
 
 - **Guardrails do Commit ao Deploy:** Quais portões automatizados de qualidade e segurança devem proteger a sua esteira ao longo do fluxo de desenvolvimento (desde o Pull Request até a publicação e promoção da imagem)?
-  > [Sua resposta aqui]
+  > - **No Pull Request:**
+  >   - build e testes unitários e de integração (Testcontainers);
+  >   - análise estática e cobertura mínima (Sonar);
+  >   - SCA das dependências do `pom.xml` (Trivy/Dependabot) e varredura de segredos no código (Gitleaks);
+  >   - lint das migrações: bloqueia `DROP`/`RENAME` de coluna que ainda esteja em uso;
+  >   - revisão obrigatória de pelo menos uma pessoa.
+  > - **No merge, ao construir a imagem:**
+  >   - SBOM CycloneDX;
+  >   - Trivy na imagem, falhando o build se houver CVE `CRITICAL` com correção disponível;
+  >   - assinatura da imagem (Cosign) e atestado de proveniência (SLSA);
+  >   - push com tag imutável.
+  > - **Na promoção:** testes da imagem e da migração (3.2) em homologação, e o cluster só aceita imagens **assinadas** e referenciadas por **digest** (policy do Kyverno ou OPA Gatekeeper).
 - **Governança e Controle em Produção:** Quais *guardrails* de processo e arquitetura impedem que alterações manuais não rastreadas cheguem à produção e como equilibrar segurança rigorosa com agilidade de resposta durante incidentes críticos sem perder a trilha de auditoria?
-  > [Sua resposta aqui]
+  > - **GitOps (Argo CD):** o estado de produção é o que está no Git. Toda mudança é um commit revisado, e o Argo CD desfaz automaticamente qualquer alteração manual no cluster (*drift*).
+  > - **Sem acesso direto:** desenvolvedores não têm permissão de escrita em produção (RBAC). O deploy é feito pela esteira; o banco só muda via Flyway, nunca por SQL manual.
+  > - **Branch protection na `main`:** PR obrigatório, checks verdes e aprovação; ninguém faz push direto.
+  > - **Agilidade no incidente:**
+  >   - o rollback já é rápido por desenho (abortar o canary ou reverter um commit no Git);
+  >   - para casos extremos existe um acesso de emergência (*break-glass*): temporário, aprovado por outra pessoa e com tudo registrado em log de auditoria;
+  >   - depois, toda mudança emergencial vira commit no Git e é discutida no post-mortem.
 
 ### 3.2 Estratégia de Testes da Imagem e da Migração
 
 - **Validação Pré-Tráfego:** Passar nos testes unitários durante o build do código não prova que a imagem final do container sobe nem que a migração de banco é retrocompatível.
 - **Plano de Testes na Pipeline:** Descreva como você testará automaticamente a imagem construída e validará a coexistência da migração de banco de dados na esteira antes de liberar o deploy para o tráfego real de clientes.
-  > [Sua resposta aqui]
+  > - **Smoke test da imagem** (na esteira, logo após o build): sobe o container real com Testcontainers (ou `docker run`) junto de um PostgreSQL e verifica:
+  >   - que a aplicação inicia como `nonroot`;
+  >   - que `/actuator/health` responde 200 dentro do tempo limite;
+  >   - que um checkout de teste funciona de ponta a ponta.
+  >
+  >   Isso pega erro de empacotamento, de configuração e de memória da JVM, que os testes unitários não pegam.
+  > - **Teste de coexistência da migração:**
+  >   1. sobe um PostgreSQL com o schema da versão em produção e aplica as migrações novas;
+  >   2. roda a **suíte de testes da `v1`** (imagem atual de produção) contra esse banco já migrado: se a `v1` quebrar, a migração não é retrocompatível e o pipeline falha;
+  >   3. roda a `v2` no mesmo banco e verifica o dual write e a leitura de dados gravados pela `v1`;
+  >   4. faz `flyway validate` para garantir que nenhuma migração já aplicada foi alterada (checksum).
+  > - **Em homologação:** carga com k6/Gatling durante um canary simulado, forçando um rollback automático para provar que ele funciona antes da Black Friday.
