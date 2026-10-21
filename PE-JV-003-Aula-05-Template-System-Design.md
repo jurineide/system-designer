@@ -40,18 +40,42 @@
 
 ### 2.1 O Modelo de Rollout em Produção
 
-- **A Escolha:** ( ) Canary Release (Liberação Gradual por Percentual)  ( ) Blue-Green Deployment (Alternância de Ambientes)
+- **A Escolha:** (X) Canary Release (Liberação Gradual por Percentual)  ( ) Blue-Green Deployment (Alternância de Ambientes)
 - **Justificativa e Mitigação das Desvantagens do seu Modelo:**
   - *Se você escolheu Canary Release:* Como o tráfego evoluirá sob 5.000 TPS, quais sinais definirão o avanço ou a reversão (rollback) automática e como lidar com o tempo em que duas versões diferentes da API atendem clientes simultaneamente?
   - *Se você escolheu Blue-Green Deployment:* Como você gerenciará o custo de infraestrutura duplicada no pico da Black Friday, o aquecimento das novas instâncias (conexões/cache) antes da virada de chave e o risco de virar 100% do tráfego de uma só vez?
-  > [Sua resposta aqui]
+  > O Canary limita o estrago a uma fração dos clientes e não exige dobrar a infraestrutura no pico, que seria o custo do Blue-Green.
+  > - **Evolução do tráfego** (Argo Rollouts ou Flagger, com pesos no ingress/service mesh): 1% → 5% → 20% → 50% → 100%, com pausas de cerca de 10 minutos entre os passos. A 5.000 TPS, até 1% já são 50 requisições por segundo, o suficiente para ter métricas confiáveis em poucos minutos.
+  > - **Sinais de avanço ou rollback automático**, sempre comparando o canary com a versão estável no mesmo período:
+  >   - taxa de erros 5xx;
+  >   - latência p99;
+  >   - taxa de falhas e compensações da Saga;
+  >   - conexões pendentes no HikariCP e esperas por lock no PostgreSQL.
+  >
+  >   Se algum sinal piorar além do limite, a análise aborta e o tráfego volta para a versão estável sem intervenção humana.
+  > - **Duas versões ao mesmo tempo:**
+  >   - o banco evolui por Expand and Contract (2.2), então as duas versões funcionam com o mesmo schema;
+  >   - contratos de API e eventos só mudam de forma aditiva (campos novos opcionais, eventos versionados, consumidores que ignoram campos desconhecidos);
+  >   - assim, um pedido que começou numa versão e continuou na outra não quebra.
 
 ### 2.2 Evolução de Schema Sem Downtime e Plano de Rollback
 
 - **Passo a Passo da Migração:** Descreva em etapas sequenciais como evoluir a coluna `status_pagamento` para `estado_saga` no PostgreSQL garantindo que as instâncias da versão antiga (`v1`) e da versão nova (`v2`) operem juntas sem erros de SQL.
-  > [Sua resposta aqui]
+  > Padrão **Expand and Contract**, espalhado por várias releases. Nenhuma migração apaga ou renomeia algo que uma versão em execução (ou alvo de rollback) ainda usa.
+  > 1. **Expand (release da v2):** a migração Flyway só **adiciona** `estado_saga` como coluna nullable, sem default (operação instantânea no PostgreSQL). A `v1` continua funcionando, porque ignora a coluna nova.
+  > 2. **Dual write (v2):** a `v2` grava nas **duas** colunas e lê `COALESCE(estado_saga, status_pagamento)`, o que cobre as linhas que a `v1` continua gravando só na coluna antiga.
+  > 3. **Backfill:** um job copia `status_pagamento` para `estado_saga` nas linhas antigas, em lotes pequenos (ex.: 5.000 linhas por vez), para não travar a tabela a 5.000 TPS.
+  > 4. **Migrate (v3):** quando a `v1` já saiu de produção e o backfill terminou, a `v3` passa a ler só `estado_saga`. Se preciso, a obrigatoriedade entra com `CHECK ... NOT VALID` seguido de `VALIDATE CONSTRAINT`, sem lock longo.
+  > 5. **Contract (release futura):** só quando nenhuma versão em produção nem alvo de rollback usa a coluna antiga, uma migração faz `DROP COLUMN status_pagamento`.
+  >
+  > Além disso, as migrações rodam num **Job separado antes do rollout**, com `lock_timeout` baixo, e não no boot de cada réplica, como aconteceu no incidente.
 - **Garantia de Rollback Imediato:** Caso a versão `v2` apresente degradação grave de performance com 20% do tráfego na Black Friday, qual é o procedimento exato de rollback e por que o seu desenho de banco de dados garante que a versão `v1` voltará a assumir 100% da carga sem quebrar nem perder dados gravados pela `v2`?
-  > [Sua resposta aqui]
+  > **Procedimento:** a análise automática do canary (ou um `kubectl argo rollouts abort checkout` manual) devolve 100% do tráfego para as réplicas da `v1`, que **continuam rodando** durante todo o canary. Leva segundos e não precisa de rebuild, nem de pull de imagem nova, nem de restaurar backup. Depois, o manifesto volta a apontar para o digest da `v1` via Git (GitOps), mantendo o histórico.
+  >
+  > **Por que o banco não quebra:**
+  > - a migração da `v2` foi só aditiva: a coluna `status_pagamento`, que a `v1` usa, continua existindo;
+  > - a `v2` gravou nas duas colunas, então tudo que ela escreveu também está em `status_pagamento` e a `v1` enxerga esses pedidos;
+  > - **não existe migração de "down"**: o banco fica como está, e a coluna `estado_saga` é simplesmente ignorada pela `v1` até a próxima tentativa.
 
 ---
 
